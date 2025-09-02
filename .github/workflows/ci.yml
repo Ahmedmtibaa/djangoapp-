@@ -8,12 +8,20 @@ on:
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/myapp
+  WORKDIR: .   # tu peux laisser "." ; si tu sais le dossier exact, mets-le ici (ex: DjangoApp/DjangoApp/MyApp)
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Debug - lister les fichiers
+        run: |
+          pwd
+          ls -la
+          echo "---- repo tree (niveau 2) ----"
+          find . -maxdepth 2 -type f | sort
 
       - uses: actions/setup-python@v5
         with:
@@ -23,15 +31,33 @@ jobs:
         run: pip install --no-cache-dir flake8
 
       - name: Lint Python
-        run: flake8 .
+        run: flake8 "${{ env.WORKDIR }}"
 
-      - name: Debug workspace
-        run: ls -la
-
-      - name: Lint Dockerfile (hadolint - volume mount)
+      - name: Localiser Dockerfile
+        id: df
+        shell: bash
         run: |
-          test -f "Dockerfile" || { echo "Dockerfile introuvable à la racine"; exit 1; }
-          docker run --rm -v "${{ github.workspace }}:/repo" hadolint/hadolint hadolint /repo/Dockerfile
+          set -e
+          # 1) Candidat par défaut (WORKDIR/Dockerfile)
+          CANDIDATE="${{ env.WORKDIR }}/Dockerfile"
+          if [ -f "$CANDIDATE" ]; then
+            DF="$CANDIDATE"
+          else
+            # 2) Recherche dans le repo
+            DF="$(git ls-files | grep -E '(^|/)[Dd]ockerfile$' | head -n1 || true)"
+          fi
+          if [ -z "$DF" ]; then
+            echo "Aucun Dockerfile trouvé dans le repo."; exit 1
+          fi
+          DIR="$(dirname "$DF")"
+          echo "Dockerfile: $DF"
+          echo "Contexte:  $DIR"
+          echo "path=$DF" >> "$GITHUB_OUTPUT"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Lint Dockerfile (hadolint)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" hadolint/hadolint hadolint "/repo/${{ steps.df.outputs.path }}"
 
   build:
     runs-on: ubuntu-latest
@@ -40,7 +66,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-qemu-action@v3
-
       - uses: docker/setup-buildx-action@v3
 
       - id: meta
@@ -52,10 +77,22 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
 
+      - name: Localiser Dockerfile (mêmes règles)
+        id: df
+        shell: bash
+        run: |
+          CANDIDATE="${{ env.WORKDIR }}/Dockerfile"
+          if [ -f "$CANDIDATE" ]; then DF="$CANDIDATE"; else DF="$(git ls-files | grep -E '(^|/)[Dd]ockerfile$' | head -n1 || true)"; fi
+          [ -n "$DF" ] || { echo "Dockerfile introuvable"; exit 1; }
+          DIR="$(dirname "$DF")"
+          echo "path=$DF" >> "$GITHUB_OUTPUT"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
       - name: Build (no push, load to local engine)
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ steps.df.outputs.dir }}
+          file:    ${{ steps.df.outputs.path }}
           push: false
           load: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -67,9 +104,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Reconstruire rapidement l'image locale (les jobs n'ont pas le même moteur)
-      - name: Rebuild for scan
-        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+      - name: Localiser Dockerfile (mêmes règles)
+        id: df
+        shell: bash
+        run: |
+          CANDIDATE="${{ env.WORKDIR }}/Dockerfile"
+          if [ -f "$CANDIDATE" ]; then DF="$CANDIDATE"; else DF="$(git ls-files | grep -E '(^|/)[Dd]ockerfile$' | head -n1 || true)"; fi
+          [ -n "$DF" ] || { echo "Dockerfile introuvable"; exit 1; }
+          DIR="$(dirname "$DF")"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Rebuild pour scan (isoler le job)
+        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} "${{ steps.df.outputs.dir }}"
 
       - name: Trivy scan (fail on CRITICAL)
         uses: aquasecurity/trivy-action@0.24.0
@@ -89,7 +135,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-qemu-action@v3
-
       - uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
@@ -107,10 +152,22 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
 
+      - name: Localiser Dockerfile (mêmes règles)
+        id: df
+        shell: bash
+        run: |
+          CANDIDATE="${{ env.WORKDIR }}/Dockerfile"
+          if [ -f "$CANDIDATE" ]; then DF="$CANDIDATE"; else DF="$(git ls-files | grep -E '(^|/)[Dd]ockerfile$' | head -n1 || true)"; fi
+          [ -n "$DF" ] || { echo "Dockerfile introuvable"; exit 1; }
+          DIR="$(dirname "$DF")"
+          echo "path=$DF" >> "$GITHUB_OUTPUT"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
       - name: Build & Push
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ steps.df.outputs.dir }}
+          file:    ${{ steps.df.outputs.path }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

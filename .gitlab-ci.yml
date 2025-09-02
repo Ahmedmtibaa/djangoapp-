@@ -1,0 +1,89 @@
+stages: [lint, build, scan, push]
+
+variables:
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_HOST: "tcp://docker:2375"
+  DOCKER_DRIVER: overlay2
+
+.before: &image_meta
+  variables:
+    IMAGE_REPO: "docker.io/${DOCKERHUB_USERNAME}/myapp"
+    IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+
+services:
+  - name: docker:24.0.5-dind
+
+lint:python:
+  stage: lint
+  image: python:3.12-slim
+  script:
+    - pip install --no-cache-dir flake8
+    - flake8 .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+lint:dockerfile:
+  stage: lint
+  image: hadolint/hadolint:latest-alpine
+  script:
+    - hadolint Dockerfile
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+build:image:
+  stage: build
+  image: docker:24.0.5
+  needs: ["lint:python","lint:dockerfile"]
+  <<: *image_meta
+  script:
+    - echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+    - docker build -t "$IMAGE_REPO:$IMAGE_TAG" -t "$IMAGE_REPO:latest" .
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        docker tag "$IMAGE_REPO:$IMAGE_TAG" "$IMAGE_REPO:$CI_COMMIT_TAG"
+      fi
+  artifacts:
+    reports:
+      dotenv: build.env
+  after_script:
+    - echo "IMAGE_REPO=$IMAGE_REPO"   >> build.env
+    - echo "IMAGE_TAG=$IMAGE_TAG"     >> build.env
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+scan:trivy:
+  stage: scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  needs: ["build:image"]
+  script:
+    - source build.env
+    - trivy image --exit-code 0 --severity MEDIUM,HIGH,CRITICAL "$IMAGE_REPO:$IMAGE_TAG"
+    - trivy image --exit-code 1 --severity CRITICAL "$IMAGE_REPO:$IMAGE_TAG" || (echo "CRITICAL vulns found" && exit 1)
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+push:dockerhub:
+  stage: push
+  image: docker:24.0.5
+  needs: ["scan:trivy"]
+  <<: *image_meta
+  script:
+    - echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+    - docker push "$IMAGE_REPO:$IMAGE_TAG"
+    - docker push "$IMAGE_REPO:latest"
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        docker push "$IMAGE_REPO:$CI_COMMIT_TAG"
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_COMMIT_TAG

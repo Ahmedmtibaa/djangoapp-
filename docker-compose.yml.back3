@@ -1,12 +1,9 @@
-version: "3.9"
-
 services:
   web:
-    image: myapp-web:fix-psycopg
-    container_name: myapp-web-test
+    build: .
+    env_file: .env
     ports:
       - "8000:8000"
-    env_file: .env
     depends_on:
       db:
         condition: service_healthy
@@ -16,7 +13,6 @@ services:
 
   db:
     image: postgres:16-alpine
-    container_name: myapp-db-test
     environment:
       POSTGRES_DB: bookstore
       POSTGRES_USER: django

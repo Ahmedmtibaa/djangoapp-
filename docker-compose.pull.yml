@@ -1,12 +1,13 @@
-version: "3.9"
-
+# docker-compose.pull.yml
 services:
   web:
-    image: myapp-web:fix-psycopg
-    container_name: myapp-web-test
+    # mplace tonusername par ton namespace Docker Hub
+    image: docker.io/${REGISTRY_USER:-tonusername}/myapp:${TAG:-latest}
+    build: null         # désactive le build défini dans le fichier de base
+    pull_policy: always # force le pull de l'image
+    env_file: .env
     ports:
       - "8000:8000"
-    env_file: .env
     depends_on:
       db:
         condition: service_healthy
@@ -16,7 +17,6 @@ services:
 
   db:
     image: postgres:16-alpine
-    container_name: myapp-db-test
     environment:
       POSTGRES_DB: bookstore
       POSTGRES_USER: django

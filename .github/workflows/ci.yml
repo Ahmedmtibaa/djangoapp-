@@ -2,130 +2,140 @@ name: CI Docker Django
 
 on:
   push:
-    branches: ["**"]
-    tags: ["*"]
+    branches: [ "**" ]
+    tags: [ "*" ]
   pull_request:
-
-# avoid parallel runs stepping on each other
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/myapp
 
 jobs:
   lint:
-    name: Lint (flake8 + hadolint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Python setup
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install flake8
-        run: pip install --no-cache-dir flake8
+      - run: pip install --no-cache-dir flake8
+      - run: flake8 .
 
-      - name: flake8
-        run: flake8 .
-
-      - name: hadolint Dockerfile
+      - name: Check Dockerfile with hadolint
         run: |
-          test -f Dockerfile || { echo "Dockerfile introuvable à la racine"; exit 1; }
-          docker run --rm -v "$PWD:/repo" hadolint/hadolint:latest hadolint /repo/Dockerfile
+          test -f "Dockerfile" || { echo "Dockerfile introuvable à la racine"; exit 1; }
+          docker run --rm -v "$PWD:/repo" hadolint/hadolint hadolint /repo/Dockerfile
 
   build:
-    name: Build image
     runs-on: ubuntu-latest
     needs: lint
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Docker meta (tags + labels)
-        id: meta
+      - id: meta
         uses: docker/metadata-action@v5
         with:
           images: docker.io/${{ env.IMAGE_NAME }}
           tags: |
             type=sha,format=short
-            type=ref,event=branch
-            type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
-          labels: |
-            org.opencontainers.image.title=myapp
-            org.opencontainers.image.source=${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            type=ref,event=tag
 
-      # Login is safe even on PR; token won't be exposed to forks
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  scan:
+    runs-on: ubuntu-latest
+    needs: build
+    outputs:
+      scan: ${{ steps.eval.outputs.scan }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rebuild image for scan
+        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} -f Dockerfile .
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Trivy scan to JSON (never fail)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          scanners: vuln
+          format: json
+          output: trivy.json
+          vuln-type: 'os,library'
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 0
+          hide-progress: true
+          timeout: 10m
+
+      - name: Evaluate CRITICAL count
+        id: eval
+        run: |
+          if ! command -v jq >/dev/null; then sudo apt-get update && sudo apt-get install -y jq; fi
+          COUNT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy.json)
+          echo "CRITICAL_COUNT=$COUNT"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "scan=failed" >> "$GITHUB_OUTPUT"
+          else
+            echo "scan=passed" >> "$GITHUB_OUTPUT"
+          fi
+
+  push:
+    runs-on: ubuntu-latest
+    needs: [build, scan]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Preflight secrets check
+        run: |
+          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "::error::DOCKERHUB_USERNAME or DOCKERHUB_TOKEN missing. Add them in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
       - name: Login to Docker Hub
-        if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
         uses: docker/login-action@v3
         with:
+          registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Build the image and load to local docker for Trivy scan
-      - name: Build (load for scan)
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+
+      - name: Build & Push
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: false
-          load: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      # Non-blocking scan: MEDIUM/HIGH/CRITICAL but do not fail the job
-      - name: Trivy scan (report, non-blocking)
-        uses: aquasecurity/trivy-action@0.24.0
-        continue-on-error: true
-        with:
-          scan-type: image
-          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
-          format: table
-          severity: MEDIUM,HIGH,CRITICAL
-          vuln-type: os,library
-          ignore-unfixed: true
-          exit-code: "0"  # never fail here
-
-      # Blocking gate only for CRITICAL on main and tags
-      - name: Trivy gate (CRITICAL blocks)
-        if: ${{ github.ref_type == 'branch' && github.ref_name == 'main' || github.ref_type == 'tag' }}
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: image
-          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
-          format: table
-          severity: CRITICAL
-          vuln-type: os,library
-          ignore-unfixed: true
-          exit-code: "1"  # fail if any CRITICAL
-
-      # Push only on main and tags, and only if we could log in
-      - name: Build & Push (main/tags only)
-        if: ${{ (github.ref_type == 'branch' && github.ref_name == 'main' || github.ref_type == 'tag') && secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
+          file: Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-  # Optional job: show which tags were published
-  summary:
-    name: Summary
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Print image info
-        run: |
-          echo "Image name: docker.io/${{ env.IMAGE_NAME }}"
-          echo "Built from commit: ${{ github.sha }}"
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ needs.scan.outputs.scan == 'failed' && format('docker.io/{0}/myapp:insecure', secrets.DOCKERHUB_USERNAME) || '' }}

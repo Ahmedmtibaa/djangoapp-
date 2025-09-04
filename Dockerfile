@@ -1,24 +1,42 @@
+
 # ---- Build stage ----
 FROM python:3.12-slim AS build
 WORKDIR /app
 
-# System deps to build wheels if needed
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Pin APT package versions (DL3008)
+ARG BUILD_ESSENTIAL_VER="*"
+ARG LIBPQ_DEV_VER="*"
+ARG GCC_VER="*"
+
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential libpq-dev gcc \
+ && apt-get install -y --no-install-recommends \
+      build-essential=${BUILD_ESSENTIAL_VER} \
+      libpq-dev=${LIBPQ_DEV_VER} \
+      gcc=${GCC_VER} \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
 
-# hadolint ignore=DL3013
-RUN pip install --upgrade pip \
- && pip install -r requirements.txt
+# Install Python deps without cache (DL3042)
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ---- Runtime stage ----
 FROM python:3.12-slim AS runtime
 
-# Add runtime libpq to be safe if psycopg2 is used
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Pin runtime libpq (DL3008)
+ARG LIBPQ_VER="*"
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq5 \
+ && apt-get install -y --no-install-recommends libpq5=${LIBPQ_VER} \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user
@@ -41,4 +59,7 @@ ENV PORT=8000
 
 # Gunicorn
 CMD ["gunicorn", "bookstore.wsgi:application", "--bind", "0.0.0.0:8000"]
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes

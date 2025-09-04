@@ -41,4 +41,4 @@ ENV PORT=8000
 
 # Gunicorn
 CMD ["gunicorn", "bookstore.wsgi:application", "--bind", "0.0.0.0:8000"]
-Y
+

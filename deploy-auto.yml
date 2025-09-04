@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# =========[ CONFIG PAR DÉFAUT – MODIFIE SI BESOIN ]=========
+REPO_URL="${REPO_URL:-https://github.com/Ahmedmtibaa/djangoapp-}"
+PROJECT_DIR="${PROJECT_DIR:-./djangoapp}"
+WEB_IMAGE="${WEB_IMAGE:-ahmed699/myapp:latest}"
+PORT="${PORT:-8000}"
+
+
+log() { printf "\033[1;36m[INFO]\033[0m %s\n" "$*"; }
+err() { printf "\033[1;31m[ERREUR]\033[0m %s\n" "$*" >&2; }
+ok()  { printf "\033[1;32m[OK]\033[0m %s\n" "$*"; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || { err "Commande requise introuvable: $1"; exit 1; }
+}
+
+wait_http() {
+  local url="$1" timeout="${2:-60}"
+  log "Attente de disponibilité HTTP: $url (timeout ${timeout}s)"
+  local start now
+  start=$(date +%s)
+  while true; do
+    if curl -fsS -o /dev/null "$url"; then
+      ok "Endpoint disponible: $url"
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - start > timeout )); then
+      err "Timeout atteint en attendant $url"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+# =========[ PRÉREQUIS ]=========
+need_cmd git
+need_cmd docker
+need_cmd curl
+
+# Compose (plugin moderne 'docker compose' requis)
+if ! docker compose version >/dev/null 2>&1; then
+  err "'docker compose' (plugin) est requis. Mettez à jour Docker Desktop/Engine."
+  exit 1
+fi
+
+# =========[ CLONE / MÀJ DU REPO ]=========
+if [[ -d "$PROJECT_DIR/.git" ]]; then
+  log "Répertoire déjà cloné: $PROJECT_DIR — mise à jour"
+  git -C "$PROJECT_DIR" fetch --all --prune
+  git -C "$PROJECT_DIR" pull --rebase --autostash
+else
+  log "Clonage du dépôt: $REPO_URL -> $PROJECT_DIR"
+  git clone "$REPO_URL" "$PROJECT_DIR"
+fi
+
+cd "$PROJECT_DIR"
+
+# =========[ .env – CRÉATION SI ABSENT ]=========
+if [[ ! -f .env ]]; then
+  log "Création d'un fichier .env par défaut"
+  cat > .env <<EOF
+WEB_IMAGE=${WEB_IMAGE}
+PORT=${PORT}
+POSTGRES_DB=bookstore
+POSTGRES_USER=django
+POSTGRES_PASSWORD=django
+DEBUG=1
+ALLOWED_HOSTS=*
+SECRET_KEY=change-me
+EOF
+else
+  log ".env déjà présent — laissé tel quel"
+fi
+
+# =========[ TIRAGE IMAGES ]=========
+log "Pull des images"
+docker pull postgres:16-alpine >/dev/null
+docker pull "$WEB_IMAGE" >/dev/null || { err "Échec du pull de $WEB_IMAGE"; exit 1; }
+
+# =========[ DÉPLOIEMENT ]=========
+log "Arrêt des services existants (si présents)"
+docker compose down || true
+
+log "Démarrage en arrière-plan"
+docker compose up -d
+
+log "États des services:"
+docker compose ps
+
+# =========[ TESTS DE SANTÉ ]=========
+# 1) Attendre que la DB soit healthy (si healthcheck configuré)
+if docker compose ps db | grep -q "healthy"; then
+  ok "Base de données healthy"
+else
+  log "Attente de la DB (jusqu'à 60s)"
+  SECS=0
+  until docker compose ps db | grep -q "healthy"; do
+    sleep 2
+    SECS=$((SECS+2))
+    if (( SECS > 60 )); then
+      err "La base n'est pas healthy après 60s"; break
+    fi
+  done
+fi
+
+# 2) Attendre que le web réponde
+wait_http "http://localhost:${PORT}/" 60 || {
+  err "Le service web ne répond pas encore. Logs récents:"
+  docker compose logs --tail=120 web || true
+  exit 1
+}
+
+# 3) Vérifier la page /admin (souvent redirection -> 302 ou 200)
+if curl -I -s "http://localhost:${PORT}/admin/" | head -n1 | grep -E "200|302" >/dev/null; then
+  ok "Page /admin accessible (200/302)"
+else
+  err "Page /admin non accessible, voir logs:"
+  docker compose logs --tail=120 web || true
+  exit 1
+fi
+
+ok "Déploiement ok"

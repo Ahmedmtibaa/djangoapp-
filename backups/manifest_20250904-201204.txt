@@ -1,0 +1,6 @@
+Date: Thu 04 Sep 2025 20:12:11 WAT
+DB:    ./backups/db_bookstore_20250904-201204.sql.gz
+MEDIA: ./backups/media_20250904-201204.tar.gz
+STATIC:./backups/static_20250904-201204.tar.gz
+Compose cmd: docker compose
+Services: DB=db WEB=web

@@ -2,32 +2,55 @@ version: "3.9"
 
 services:
   web:
-    image: myapp-web:fix-psycopg
-    container_name: myapp-web-test
+    image: ${WEB_IMAGE:-ahmed699/myapp:latest}
     ports:
       - "8000:8000"
-    env_file: .env
     depends_on:
       db:
         condition: service_healthy
+    env_file: .env
+    environment:
+      # Si ton projet n'utilise pas DATABASE_URL, adapte/retire
+      DATABASE_URL: postgres://${POSTGRES_USER:-django}:${POSTGRES_PASSWORD:-django}@db:5432/${POSTGRES_DB:-bookstore}
+      PORT: ${PORT:-8000}
+      # Facultatif : utile si DEBUG/ALLOWED_HOSTS/SECRET_KEY sont lus dans settings
+      DEBUG: ${DEBUG:-1}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+      SECRET_KEY: ${SECRET_KEY:-change-me}
     volumes:
       - django_media:/app/media
       - django_static:/app/staticfiles
+    # Démarre en root juste pour préparer les volumes, puis drop vers 'django'
+    user: "0:0"
+    command: >
+      sh -lc "
+        mkdir -p /app/staticfiles /app/media &&
+        chown -R django:django /app/staticfiles /app/media &&
+        su -s /bin/sh django -c 'python manage.py migrate --noinput' &&
+        su -s /bin/sh django -c 'python manage.py collectstatic --noinput' &&
+        exec su -s /bin/sh django -c 'gunicorn bookstore.wsgi:application --bind 0.0.0.0:$${PORT:-8000}'
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:$${PORT:-8000}/admin/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
 
   db:
     image: postgres:16-alpine
-    container_name: myapp-db-test
     environment:
-      POSTGRES_DB: bookstore
-      POSTGRES_USER: django
-      POSTGRES_PASSWORD: django
+      POSTGRES_DB: ${POSTGRES_DB:-bookstore}
+      POSTGRES_USER: ${POSTGRES_USER:-django}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-django}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U django -d bookstore"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-django} -d ${POSTGRES_DB:-bookstore}"]
       interval: 5s
       timeout: 3s
       retries: 12
     volumes:
       - django_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
 
 volumes:
   django_media:

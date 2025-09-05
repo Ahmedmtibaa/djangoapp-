@@ -101,4 +101,4 @@ find "$BACKUP_DIR" -type f -mtime "+${RETENTION_DAYS}" -name '*.gz' -delete || t
 find "$BACKUP_DIR" -type f -mtime "+${RETENTION_DAYS}" -name 'manifest_*.txt' -delete || true
 ok "Rétention OK"
 
-ok "Backup terminé ✅"
+ok "Backup terminé"
